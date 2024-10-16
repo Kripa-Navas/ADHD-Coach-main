@@ -1,5 +1,12 @@
-matplotlib==3.7.1
-numpy==1.24.3
-pandas==2.0.1
-scikit-learn==1.2.2
-statsmodels==0.14.0
+# Core dependencies
+streamlit
+openai>=0.27.0
+requests
+requests-oauthlib
+langchain>=0.0.100
+todoist-api-python
+tiktoken
+PyPDF2
+
+# Vector store dependency for FAISS (optional)
+faiss-cpu
