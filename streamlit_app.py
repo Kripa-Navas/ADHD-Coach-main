@@ -7,7 +7,9 @@ import requests
 from requests_oauthlib import OAuth2Session
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import webbrowser
-import openai
+from openai import OpenAI
+
+client = OpenAI(api_key=openai_api_key)
 import streamlit as st
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
@@ -15,7 +17,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from todoist_api_python.api import TodoistAPI
 import PyPDF2
 from dotenv import load_dotenv
-from openai import OpenAIError
+from openai import OpenAI, OpenAIError
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -185,15 +187,13 @@ def generate_response(task, user_input):
     task_description = getattr(task, 'description', "No description available")
     prompt = f"You have a task: {task_title}. Details: {task_description}. {user_input}"
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response['choices'][0]['message']['content']
+        response = client.chat.completions.create(model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}])
+        return response.choices[0].message.content
     except OpenAIError as e:
         print(f"OpenAI API error: {e}")
         return "I'm sorry, I encountered an issue generating a response."
-    
+
 # Generate a response based on the availability of a sample task
 if sample_task:
     response = generate_response(sample_task, user_input)
@@ -249,11 +249,9 @@ def generate_coach_response_with_rag(task_title, user_input):
     prompt = f"Use the following ADHD textbook information:\n\n{context}\n\n" \
              f"The user has the following task: {task_title}. The user says: {user_input}"
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response['choices'][0]['message']['content']
+        response = client.chat.completions.create(model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}])
+        return response.choices[0].message.content
     except OpenAIError as e:
         print(f"OpenAI API error: {e}")
         return "I'm sorry, I encountered an issue generating a response."
