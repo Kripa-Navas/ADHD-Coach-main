@@ -7,24 +7,26 @@ import requests
 from requests_oauthlib import OAuth2Session
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import webbrowser
-from openai import OpenAI
-
-client = OpenAI(api_key=openai_api_key)
 import streamlit as st
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from todoist_api_python.api import TodoistAPI
 import PyPDF2
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
+import os
+import json
+import openai
 
 # Load environment variables from the .env file
 load_dotenv()
 client_id = os.getenv("TODOIST_CLIENT_ID")
 client_secret = os.getenv("TODOIST_CLIENT_SECRET")
 openai_api_key = os.getenv("OPENAI_API_KEY")
-openai.api_key = openai_api_key
+
+# Create an instance of the OpenAI client
+client = OpenAI(api_key=openai_api_key)
 
 # Configuration details
 redirect_uri = "http://localhost:8010/callback"  # Ensure this matches your Todoist redirect URI
@@ -34,6 +36,9 @@ scope = "data:read_write"
 
 # Directory containing ADHD textbooks in PDF format
 pdf_directory = "/Users/kripanavas/Downloads/ADHD-Coach-main/rag"
+
+# Define the path for storing the token
+token_file_path = 'todoist_token.json'
 
 # --- Define the Task and Due classes globally ---
 class Task:
@@ -45,121 +50,103 @@ class Due:
     def __init__(self, date):
         self.date = date
 
-# --- 2. Todoist OAuth Flow ---
-# Function to fetch access token after authorization
-def fetch_access_token(auth_code, retries=3, delay=2):
-    data = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": auth_code,
-        "redirect_uri": redirect_uri,
-    }
-    for attempt in range(retries):
-        print(f"Attempt {attempt + 1} to fetch access token...")  # Debugging statement
-        try:
-            response = requests.post(token_url, data=data, timeout=5)
-            print("Access token response:", response.status_code)  # Debugging statement
-            if response.status_code == 200:
-                token = response.json()
-                print("Access token retrieved:", token['access_token'])  # Debugging statement
-                return token['access_token']
-            else:
-                print("Failed to retrieve access token:", response.status_code, response.text)
-                return None
-        except requests.exceptions.Timeout:
-            print(f"Attempt {attempt + 1} timed out. Retrying in {delay} seconds...")
-            time.sleep(delay)
-        except requests.exceptions.RequestException as e:
-            print(f"An error occurred: {e}")
-            return None
-    print("All attempts to fetch access token have failed. Calling backup method.")
-    return backup_access_token_method()
-
-def backup_access_token_method():
-    print("Executing backup method for access token.")
-    # Since access token is essential, you might need to re-initiate the OAuth flow
-    # or inform the user to try again later
-    # For now, we'll return None to indicate failure
+# Step 1: Load or Retrieve OAuth Token
+def load_token():
+    # Load token from the file if it exists
+    if os.path.exists(token_file_path):
+        with open(token_file_path, 'r') as token_file:
+            token_data = json.load(token_file)
+            return token_data.get("access_token")
     return None
 
-# Start OAuth2 session
-todoist = OAuth2Session(client_id, redirect_uri=redirect_uri, scope=[scope])
-authorization_url, state = todoist.authorization_url(authorization_base_url)
-print("Go to the following URL to authorize:", authorization_url)
-webbrowser.open(authorization_url)
+def save_token(access_token):
+    # Save token to a file
+    with open(token_file_path, 'w') as token_file:
+        json.dump({"access_token": access_token}, token_file)
 
-# Define callback handler for local server
-class OAuthCallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"You can close this window.")
-        query = self.path.split('?', 1)[-1]
-        params = dict(qc.split('=') for qc in query.split('&'))
-        authorization_code = params.get("code")
-        if authorization_code:
-            print("Authorization code received:", authorization_code)  # Debugging statement
-            access_token = fetch_access_token(authorization_code)
-            self.server.token = {"access_token": access_token} if access_token else None
+# Streamlit session state for access token
+if 'access_token' not in st.session_state:
+    st.session_state.access_token = load_token()
 
-# Start server to handle OAuth callback
-server_address = ('', 8010)
-httpd = HTTPServer(server_address, OAuthCallbackHandler)
-print("Waiting for the callback with the authorization code...")
-httpd.handle_request()
-print("Callback received.")  # Debugging statement
+# Step 2: Authorization - Only required if no token
+if not st.session_state.access_token:
+    # Function to fetch access token after authorization
+    def fetch_access_token(auth_code, retries=3, delay=2):
+        data = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": auth_code,
+            "redirect_uri": redirect_uri,
+        }
+        for attempt in range(retries):
+            try:
+                response = requests.post(token_url, data=data, timeout=5)
+                if response.status_code == 200:
+                    token = response.json()
+                    return token['access_token']
+                else:
+                    print("Failed to retrieve access token:", response.status_code, response.text)
+                    return None
+            except requests.exceptions.Timeout:
+                time.sleep(delay)
+            except requests.exceptions.RequestException as e:
+                print(f"An error occurred: {e}")
+                return None
+        return None
 
-# Retrieve and set access token
-if hasattr(httpd, 'token') and httpd.token:
-    access_token = httpd.token['access_token']
+    # Start OAuth2 session
+    todoist = OAuth2Session(client_id, redirect_uri=redirect_uri, scope=[scope])
+    authorization_url, state = todoist.authorization_url(authorization_base_url)
+    print("Go to the following URL to authorize:", authorization_url)
+    webbrowser.open(authorization_url)
+
+    # Define callback handler for local server
+    class OAuthCallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"You can close this window.")
+            query = self.path.split('?', 1)[-1]
+            params = dict(qc.split('=') for qc in query.split('&'))
+            authorization_code = params.get("code")
+            if authorization_code:
+                access_token = fetch_access_token(authorization_code)
+                if access_token:
+                    st.session_state.access_token = access_token
+                    save_token(access_token)
+
+    # Start server to handle OAuth callback
+    server_address = ('', 8010)
+    httpd = HTTPServer(server_address, OAuthCallbackHandler)
+    print("Waiting for the callback with the authorization code...")
+    httpd.handle_request()
+    print("Callback received.")  # Debugging statement
+
+# Retrieve and set access token in headers if available
+if st.session_state.access_token:
+    access_token = st.session_state.access_token
     headers = {'Authorization': f"Bearer {access_token}"}
-    print("Access token retrieved.")
 else:
-    print("Failed to retrieve access token.")
-    access_token = None  # Ensure access_token is defined
+    st.error("Failed to retrieve access token. Please restart the application and try authorizing again.")
 
 # --- 3. Todoist Task Retrieval ---
 def fetch_tasks():
-    """
-    Attempts to fetch tasks from the Todoist API with a timeout.
-    If the call fails or times out, it uses the backup method.
-    """
     if not access_token:
         print("No access token available. Using backup method.")
         return fetchMocked()
     try:
         url = 'https://api.todoist.com/rest/v2/tasks'
         headers = {'Authorization': f'Bearer {access_token}'}
-        # Set timeout to 5 seconds
         response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status()  # Raises an HTTPError if the response was unsuccessful
+        response.raise_for_status()
         data = response.json()
-        tasks = []
-        for item in data:
-            content = item.get('content')
-            due_data = item.get('due')
-            due_date = due_data.get('date') if due_data else None
-            due = Due(due_date) if due_date else None
-            tasks.append(Task(content, due))
-        if tasks:
-            for task in tasks:
-                print(f"Task: {task.content} - Due: {task.due.date if task.due else 'No due date'}")
-        else:
-            print("No tasks found.")
+        tasks = [Task(item.get('content'), Due(item.get('due').get('date')) if item.get('due') else None) for item in data]
         return tasks
-    except requests.exceptions.Timeout:
-        print("API call timed out. Using backup method.")
-        return fetchMocked()
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")
         return fetchMocked()
 
 def fetchMocked():
-    """
-    Provides a backup list of tasks in case the API call fails.
-    """
-    print("Executing backup method.")
-    # Create a list of tasks with and without due dates
     tasks = [
         Task('Finish the quarterly report', Due('2023-10-15')),
         Task('Email the client about the new proposal', None),
@@ -170,11 +157,7 @@ def fetchMocked():
 
 # --- Initialize tasks in session state ---
 if 'tasks' not in st.session_state:
-    st.session_state.tasks = []  # Initialize as an empty list in session state
-
-# --- Fetch tasks if not already done ---
-if not st.session_state.tasks:  # Only fetch if `tasks` is empty
-    st.session_state.tasks = fetch_tasks()  # Populate tasks in session state
+    st.session_state.tasks = fetch_tasks()
 
 # Set a sample task for testing if no tasks are returned
 sample_task = st.session_state.tasks[0] if st.session_state.tasks else None
@@ -187,8 +170,10 @@ def generate_response(task, user_input):
     task_description = getattr(task, 'description', "No description available")
     prompt = f"You have a task: {task_title}. Details: {task_description}. {user_input}"
     try:
-        response = client.chat.completions.create(model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}])
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
         return response.choices[0].message.content
     except OpenAIError as e:
         print(f"OpenAI API error: {e}")
@@ -198,12 +183,14 @@ def generate_response(task, user_input):
 if sample_task:
     response = generate_response(sample_task, user_input)
 else:
-    # Fallback for when no tasks are available
     mock_task = Task("Graduation PPT", None)
     response = generate_response(mock_task, user_input)
 
 print("Kira's response:", response)
 
+# Load OpenAI API key from the environment or set it directly
+openai_api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = openai_api_key
 
 # --- 5. RAG Setup with ADHD Textbooks ---
 def extract_text_from_pdf(pdf_file):
@@ -213,11 +200,7 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 def load_and_preprocess_texts():
-    texts = []
-    for filename in os.listdir(pdf_directory):
-        if filename.endswith(".pdf"):
-            file_path = os.path.join(pdf_directory, filename)
-            texts.append(extract_text_from_pdf(file_path))
+    texts = [extract_text_from_pdf(os.path.join(pdf_directory, filename)) for filename in os.listdir(pdf_directory) if filename.endswith(".pdf")]
     return "\n\n".join(texts)
 
 def setup_vectorstore():
@@ -233,14 +216,12 @@ def setup_vectorstore():
 
 vectorstore = setup_vectorstore()
 
-# Retrieve relevant docs for user query
 def retrieve_relevant_docs(query):
     try:
         return vectorstore.similarity_search(query, k=5)
     except Exception as e:
         print(f"Error retrieving documents: {e}")
         return []
-
 
 # --- 6. Generate Response with RAG ---
 def generate_coach_response_with_rag(task_title, user_input):
@@ -249,8 +230,10 @@ def generate_coach_response_with_rag(task_title, user_input):
     prompt = f"Use the following ADHD textbook information:\n\n{context}\n\n" \
              f"The user has the following task: {task_title}. The user says: {user_input}"
     try:
-        response = client.chat.completions.create(model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}])
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
         return response.choices[0].message.content
     except OpenAIError as e:
         print(f"OpenAI API error: {e}")
@@ -265,10 +248,30 @@ st.write("Ask Kira for support with your tasks and ADHD-related guidance.")
 task_title = st.text_input("What is your task?", placeholder="e.g., 'Complete my graduation PPT'")
 user_input = st.text_input("What would you like help with?", placeholder="I need help focusing on this task")
 
-# Display Kira's response
+# Create a placeholder for the response that can be updated later
+response_placeholder = st.empty()
+
+# Check if 'kira_response' exists in the session state, if yes, display it
+if "kira_response" in st.session_state and st.session_state.kira_response:
+    response_placeholder.write(f"**Kira**: {st.session_state.kira_response}")
+
+# Button to trigger Kira's response
 if st.button("Ask Kira"):
-    if task_title and user_input:
-        response = generate_coach_response_with_rag(task_title, user_input)
-        st.write(f"**Kira**: {response}")
+    # Check if the user has provided both a task and a question
+    if not task_title or not user_input:
+        st.error("Please enter both a task and your question for Kira.")
+    elif not st.session_state.get("access_token"):
+        st.error("Please complete the authorization process first.")
     else:
-        st.write("Please enter both a task and your question for Kira.")
+        # Generate response using the RAG-based model
+        try:
+            response = generate_coach_response_with_rag(task_title, user_input)
+            if response:
+                st.markdown(f"**Kira**: {response}")  # Display Kira's response directly under the button
+            else:
+                st.write("Kira could not generate a response. Please try again.")
+        except Exception as e:
+            st.write(f"An error occurred: {e}")
+            # Display Kira's response if it exists in session state
+if 'kira_response' in st.session_state:
+    st.text_area("Kira's Response", st.session_state['kira_response'], height=150)
